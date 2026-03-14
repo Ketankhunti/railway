@@ -1,0 +1,21 @@
+[package]
+name = "rail-obs-collector"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rail-obs-common = { workspace = true }
+rail-obs-http-parser = { workspace = true }
+rail-obs-span-assembler = { workspace = true }
+rail-obs-ingestion = { workspace = true }
+rail-obs-alerting = { workspace = true }
+rail-obs-discovery = { workspace = true }
+rail-obs-api = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+
+[[bin]]
+name = "rail-obs"
+path = "src/main.rs"

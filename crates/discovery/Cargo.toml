@@ -1,0 +1,12 @@
+[package]
+name = "rail-obs-discovery"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rail-obs-common = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

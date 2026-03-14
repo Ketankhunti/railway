@@ -1,0 +1,11 @@
+[package]
+name = "rail-obs-span-assembler"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rail-obs-common = { workspace = true }
+rail-obs-http-parser = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }

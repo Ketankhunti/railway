@@ -1,0 +1,17 @@
+[package]
+name = "rail-obs-api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rail-obs-common = { workspace = true }
+rail-obs-ingestion = { workspace = true }
+rail-obs-alerting = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
