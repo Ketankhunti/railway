@@ -55,6 +55,10 @@ pub struct ConnectionState {
     pub bytes_recv: u64,
 }
 
+/// Maximum pending requests per connection. Safety guard against unbounded
+/// memory growth independent of the assembler's config.
+const MAX_PENDING_HARD_LIMIT: usize = 256;
+
 impl ConnectionState {
     /// Create a new connection state for an outbound connection (client side).
     pub fn new_client(key: ConnectionKey, client_netns: u32, timestamp_ns: u64) -> Self {
@@ -87,7 +91,12 @@ impl ConnectionState {
     }
 
     /// Push a new pending request onto the queue.
+    /// If the queue exceeds the hard limit, the oldest request is dropped
+    /// to prevent unbounded memory growth.
     pub fn push_request(&mut self, req: PendingRequest) {
+        if self.pending_requests.len() >= MAX_PENDING_HARD_LIMIT {
+            self.pending_requests.pop_front();
+        }
         self.pending_requests.push_back(req);
     }
 

@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "rail-obs-ebpf-common",
+    "rail-obs-ebpf-probes",
+    "rail-obs-userspace",
+]

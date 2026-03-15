@@ -1,0 +1,7 @@
+[package]
+name = "rail-obs-ebpf-common"
+version = "0.1.0"
+edition = "2021"
+
+# No dependencies — this crate must compile for BOTH the BPF target
+# (no_std) and the userspace target (std). Only use core/no_std types.

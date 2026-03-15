@@ -37,6 +37,12 @@ pub async fn create_rule(
     if body.name.is_empty() {
         return Err(ApiError::BadRequest("name is required".into()));
     }
+    if body.name.len() > 256 {
+        return Err(ApiError::BadRequest("name too long (max 256 chars)".into()));
+    }
+    if body.project_id.len() > 128 || body.service_id.len() > 128 {
+        return Err(ApiError::BadRequest("project_id and service_id must be <= 128 chars".into()));
+    }
 
     let valid_types = ["threshold", "anomaly", "rate_of_change"];
     if !valid_types.contains(&body.rule_type.as_str()) {
@@ -81,6 +87,30 @@ pub async fn update_rule(
     Path(rule_id): Path<String>,
     Json(body): Json<CreateAlertRuleRequest>,
 ) -> Result<Json<ApiResponse<AlertRuleResponse>>, ApiError> {
+    // Validate inputs (same checks as create_rule)
+    if body.name.is_empty() {
+        return Err(ApiError::BadRequest("name is required".into()));
+    }
+    if body.name.len() > 256 {
+        return Err(ApiError::BadRequest("name too long (max 256 chars)".into()));
+    }
+
+    let valid_types = ["threshold", "anomaly", "rate_of_change"];
+    if !valid_types.contains(&body.rule_type.as_str()) {
+        return Err(ApiError::BadRequest(format!(
+            "invalid rule_type '{}', must be one of: {:?}",
+            body.rule_type, valid_types
+        )));
+    }
+
+    let valid_severities = ["critical", "warning", "info"];
+    if !valid_severities.contains(&body.severity.as_str()) {
+        return Err(ApiError::BadRequest(format!(
+            "invalid severity '{}', must be one of: {:?}",
+            body.severity, valid_severities
+        )));
+    }
+
     let updated = AlertRuleResponse {
         id: rule_id.clone(),
         project_id: body.project_id,

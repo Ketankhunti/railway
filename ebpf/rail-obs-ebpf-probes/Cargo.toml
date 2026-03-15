@@ -1,0 +1,13 @@
+[package]
+name = "rail-obs-ebpf-probes"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.1"
+rail-obs-ebpf-common = { path = "../rail-obs-ebpf-common" }
+
+[[bin]]
+name = "rail-obs-probes"
+path = "src/main.rs"

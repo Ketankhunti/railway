@@ -10,6 +10,7 @@ members = [
     "crates/collector",
     "crates/discovery",
 ]
+exclude = ["ebpf"]
 
 [workspace.package]
 version = "0.1.0"

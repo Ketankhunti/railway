@@ -1,4 +1,18 @@
 //! Axum application setup: router, shared state, CORS.
+//!
+//! ## Tenant Isolation (SECURITY)
+//!
+//! Every API endpoint requires `project_id` as a query/path parameter.
+//! In the prototype, this is trusted from the client (no auth).
+//!
+//! **In production**, this MUST be replaced with:
+//! 1. An auth middleware that validates a JWT/API key from the `Authorization` header
+//! 2. The middleware extracts allowed project IDs from the token claims
+//! 3. Handlers receive the validated project_id from the middleware, NOT from query params
+//! 4. Every ClickHouse/PostgreSQL query includes `WHERE project_id = $validated_id`
+//!
+//! This is the #1 security boundary in the system. Without it, any user
+//! can read any other user's traces, metrics, and alerts.
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
