@@ -15,6 +15,10 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+rand = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+axum = { workspace = true }
 
 [[bin]]
 name = "rail-obs"

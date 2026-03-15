@@ -795,6 +795,8 @@ name = "rail-obs-collector"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
+ "chrono",
  "rail-obs-alerting",
  "rail-obs-api",
  "rail-obs-common",
@@ -802,6 +804,8 @@ dependencies = [
  "rail-obs-http-parser",
  "rail-obs-ingestion",
  "rail-obs-span-assembler",
+ "rand",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
