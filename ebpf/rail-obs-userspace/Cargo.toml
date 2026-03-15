@@ -12,3 +12,17 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 bytes = "1"
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+
+# Main workspace crates (referenced by relative path)
+rail-obs-common = { path = "../../crates/common" }
+rail-obs-http-parser = { path = "../../crates/http-parser" }
+rail-obs-span-assembler = { path = "../../crates/span-assembler" }
+rail-obs-ingestion = { path = "../../crates/ingestion" }
+rail-obs-alerting = { path = "../../crates/alerting" }
+rail-obs-api = { path = "../../crates/api" }

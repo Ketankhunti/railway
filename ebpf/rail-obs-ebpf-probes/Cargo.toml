@@ -11,3 +11,8 @@ rail-obs-ebpf-common = { path = "../rail-obs-ebpf-common" }
 [[bin]]
 name = "rail-obs-probes"
 path = "src/main.rs"
+
+[profile.release]
+opt-level = 2
+debug = false
+lto = true

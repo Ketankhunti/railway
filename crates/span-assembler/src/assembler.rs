@@ -108,10 +108,17 @@ impl SpanAssembler {
     }
 
     fn handle_send(&mut self, event: &TcpEvent) -> Vec<SpanEvent> {
+        let key = Self::map_key(event);
+
         if event.payload.is_empty() {
+            // No payload (e.g., eBPF kprobe captured metadata only).
+            // Still register/update the connection so CLOSE can emit a span.
+            self.connections.entry(key).or_insert_with(|| {
+                ConnectionState::new_client(event.connection_key(), event.netns, event.timestamp_ns)
+            });
             return vec![];
         }
-        let key = Self::map_key(event);
+
         if is_http_request(&event.payload) {
             self.handle_client_request(event, key);
             vec![]
@@ -124,10 +131,16 @@ impl SpanAssembler {
     }
 
     fn handle_recv(&mut self, event: &TcpEvent) -> Vec<SpanEvent> {
+        let key = Self::map_key(event);
+
         if event.payload.is_empty() {
+            // No payload — still register connection.
+            self.connections.entry(key).or_insert_with(|| {
+                ConnectionState::new_server(event.connection_key(), event.netns, event.timestamp_ns)
+            });
             return vec![];
         }
-        let key = Self::map_key(event);
+
         if is_http_request(&event.payload) {
             self.handle_server_request(event, key);
             vec![]
@@ -286,15 +299,88 @@ impl SpanAssembler {
 
         for mk in matching_keys {
             if let Some(mut conn) = self.connections.remove(&mk) {
-                for pending in conn.drain_pending() {
-                    let span = self.build_span(&pending, 0, event.timestamp_ns, mk.1, &conn_key);
+                let drained = conn.drain_pending();
+                if drained.is_empty() {
+                    // No HTTP requests were parsed on this connection (e.g., eBPF
+                    // kprobes captured metadata but no payload). Emit a connection-
+                    // level span so the trace pipeline still records the connection.
+                    let span = self.build_connection_span(
+                        &conn, event.timestamp_ns, mk.1, &conn_key,
+                    );
                     spans.push(span);
                     self.spans_emitted += 1;
+                } else {
+                    for pending in drained {
+                        let span = self.build_span(
+                            &pending, 0, event.timestamp_ns, mk.1, &conn_key,
+                        );
+                        spans.push(span);
+                        self.spans_emitted += 1;
+                    }
                 }
             }
         }
 
         spans
+    }
+
+    /// Build a connection-level span when no HTTP was parsed.
+    /// Uses connection metadata (4-tuple, timing, bytes) instead of HTTP fields.
+    fn build_connection_span(
+        &self,
+        conn: &ConnectionState,
+        end_time_ns: u64,
+        netns: u32,
+        key: &ConnectionKey,
+    ) -> SpanEvent {
+        let duration_us = if end_time_ns > conn.connect_time_ns {
+            (end_time_ns - conn.connect_time_ns) / 1_000
+        } else {
+            0
+        };
+
+        let (project_id, service_id, environment_id, container_id) =
+            if let Some(meta) = self.service_mapping.resolve(netns) {
+                (
+                    meta.project_id.clone(),
+                    meta.service_id.clone(),
+                    meta.environment_id.clone(),
+                    meta.container_id.clone(),
+                )
+            } else {
+                (
+                    "unknown".into(),
+                    "unknown".into(),
+                    "unknown".into(),
+                    format!("netns-{}", netns),
+                )
+            };
+
+        SpanEvent {
+            trace_id: generate_trace_id(),
+            span_id: generate_span_id(),
+            parent_span_id: 0,
+            project_id,
+            service_id,
+            environment_id,
+            http_method: "TCP".into(),
+            http_path: format!("{}:{}", key.dst_ip, key.dst_port),
+            http_route: String::new(),
+            http_status: 0,
+            http_host: format!("{}:{}", key.dst_ip, key.dst_port),
+            start_time_ns: conn.connect_time_ns,
+            duration_us,
+            src_ip: key.src_ip,
+            src_port: key.src_port,
+            dst_ip: key.dst_ip,
+            dst_port: key.dst_port,
+            dst_service_id: String::new(),
+            host_id: self.config.host_id.clone(),
+            container_id,
+            is_error: false,
+            is_root: true,
+            sample_rate: 1.0,
+        }
     }
 
     fn build_span(

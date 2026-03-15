@@ -1,11 +1,10 @@
-//! Userspace eBPF loader for the Railway Observability Engine.
+//! Railway Observability Engine — eBPF-powered Collector
 //!
-//! Loads the compiled BPF bytecode, attaches all 5 probes,
-//! and reads events from the ring buffer.
-//!
+//! Real pipeline: eBPF ring buffer → span assembler → API server
 //! Must be run as root (or with CAP_BPF + CAP_NET_ADMIN).
 
 use std::net::Ipv4Addr;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use aya::Ebpf;
@@ -17,131 +16,154 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use rail_obs_ebpf_common::TcpEventHeader;
+use rail_obs_common::service::{ServiceMapping, ServiceMeta};
+use rail_obs_common::span::trace_id_to_hex;
+use rail_obs_span_assembler::{SpanAssembler, AssemblerConfig, TcpEvent, TcpEventKind, Direction};
+use rail_obs_alerting::{
+    AlertEngine, AlertEngineConfig, AlertRule, AlertRuleConfig,
+    rules::{ThresholdConfig, Metric, Operator, Severity},
+};
+use rail_obs_api::app::{AppState, create_router};
+use rail_obs_api::models::SpanDetail;
+use rail_obs_ingestion::normalize_route;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
-    info!("rail-obs userspace loader starting");
+    info!("rail-obs eBPF collector starting");
 
-    let bpf_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "target/bpfel-unknown-none/debug/rail-obs-probes".into());
-
-    info!(path = %bpf_path, "loading eBPF program");
-
-    let bpf_bytes = std::fs::read(&bpf_path)
-        .with_context(|| format!("failed to read BPF binary at {}", bpf_path))?;
-
-    let mut ebpf = Ebpf::load(&bpf_bytes)
-        .context("failed to load eBPF program into kernel")?;
-
-    // Initialize eBPF logging
+    // ─── Load eBPF ───────────────────────────────────────────────
+    let bpf_path = std::env::args().nth(1)
+        .unwrap_or_else(|| "target/bpfel-unknown-none/release/rail-obs-probes".into());
+    let mut ebpf = Ebpf::load(&std::fs::read(&bpf_path)?)?;
     if let Err(e) = EbpfLogger::init(&mut ebpf) {
-        warn!("eBPF logger init: {} (non-fatal)", e);
+        warn!("eBPF logger: {} (non-fatal)", e);
     }
 
-    // ─── Attach all 5 probes ──────────────────────────────────────
+    // ─── Attach probes ───────────────────────────────────────────
+    for name in ["tcp_v4_connect", "inet_csk_accept", "tcp_sendmsg", "tcp_recvmsg", "tcp_close"] {
+        let prog: &mut KProbe = ebpf.program_mut(name).context(name)?.try_into()?;
+        prog.load()?;
+        prog.attach(name, 0)?;
+        info!("attached: {}", name);
+    }
 
-    // 1. kprobe: tcp_v4_connect
-    attach_kprobe(&mut ebpf, "tcp_v4_connect", "tcp_v4_connect")?;
+    // ─── Pipeline ────────────────────────────────────────────────
+    let mut assembler = SpanAssembler::new(
+        AssemblerConfig { max_connections: 100_000, max_pending_per_conn: 64, host_id: "wsl2".into() },
+        demo_mapping(),
+    );
+    let mut alert_engine = AlertEngine::new(AlertEngineConfig { max_window_secs: 3600, eval_interval_spans: 50 });
+    alert_engine.add_rule(AlertRule {
+        id: "r1".into(), project_id: "proj_demo".into(), name: "Errors".into(),
+        service_id: String::new(),
+        config: AlertRuleConfig::Threshold(ThresholdConfig {
+            metric: Metric::ErrorRate, operator: Operator::GreaterThan,
+            value: 0.10, window_secs: 60, min_requests: 20,
+        }),
+        severity: Severity::Critical, enabled: true, cooldown_secs: 120,
+    });
 
-    // 2. kretprobe: inet_csk_accept (uses kprobe attach with ret=true internally)
-    attach_kprobe(&mut ebpf, "inet_csk_accept", "inet_csk_accept")?;
+    let state = Arc::new(AppState::new());
 
-    // 3. kprobe: tcp_sendmsg
-    attach_kprobe(&mut ebpf, "tcp_sendmsg", "tcp_sendmsg")?;
+    // ─── API server (on a separate tokio runtime to not block ring buffer) ───
+    let api_state = state.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let r = create_router(api_state);
+            let l = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+            info!("API on http://0.0.0.0:3000");
+            axum::serve(l, r).await.unwrap();
+        });
+    });
 
-    // 4. kprobe: tcp_recvmsg
-    attach_kprobe(&mut ebpf, "tcp_recvmsg", "tcp_recvmsg")?;
+    // ─── Ring buffer → pipeline (same pattern as working binary) ─
+    let mut ring_buf = RingBuf::try_from(ebpf.take_map("EVENTS").context("EVENTS")?)?;
+    info!("pipeline ready");
 
-    // 5. kprobe: tcp_close
-    attach_kprobe(&mut ebpf, "tcp_close", "tcp_close")?;
-
-    info!("all 5 probes attached successfully");
-
-    // ─── Read ring buffer ─────────────────────────────────────────
-
-    let mut ring_buf = RingBuf::try_from(
-        ebpf.take_map("EVENTS").context("EVENTS map not found")?
-    ).context("failed to create RingBuf")?;
-
-    info!("ring buffer connected — listening for events");
-    info!("press Ctrl-C to stop");
-
-    let mut event_count: u64 = 0;
-    let mut last_report: u64 = 0;
+    let mut n: u64 = 0;
+    let mut spans_total: u64 = 0;
 
     loop {
         tokio::select! {
             _ = signal::ctrl_c() => {
-                info!(total_events = event_count, "shutting down");
+                info!(events=n, spans=spans_total, "bye");
                 break;
             }
             _ = async {
-                while let Some(event) = ring_buf.next() {
-                    let data = event.as_ref();
-                    if data.len() < core::mem::size_of::<TcpEventHeader>() {
-                        warn!(len = data.len(), "event too small, skipping");
-                        continue;
+                // Drain ring buffer (synchronous, no .await inside)
+                let mut batch = Vec::new();
+                while let Some(ev) = ring_buf.next() {
+                    let b: &[u8] = ev.as_ref();
+                    if b.len() >= core::mem::size_of::<TcpEventHeader>() {
+                        let h: &TcpEventHeader = unsafe { &*(b.as_ptr() as *const TcpEventHeader) };
+                        n += 1;
+                        let src = Ipv4Addr::from(u32::from_be(h.src_addr));
+                        let dst = Ipv4Addr::from(u32::from_be(h.dst_addr));
+                        batch.push(TcpEvent {
+                            timestamp_ns: h.timestamp_ns, pid: h.pid, netns: h.netns, fd: 0,
+                            kind: match h.kind {
+                                0 => TcpEventKind::Connect, 1 => TcpEventKind::Accept,
+                                2 => TcpEventKind::Data(Direction::Send),
+                                3 => TcpEventKind::Data(Direction::Recv),
+                                _ => TcpEventKind::Close,
+                            },
+                            src_ip: src.into(), src_port: h.src_port,
+                            dst_ip: dst.into(), dst_port: h.dst_port,
+                            payload: vec![],
+                        });
                     }
-
-                    let header: &TcpEventHeader =
-                        unsafe { &*(data.as_ptr() as *const TcpEventHeader) };
-
-                    event_count += 1;
-                    log_event(header, event_count);
                 }
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                // ring_buf borrow is released here — safe to .await below
+
+                // Process batch through real pipeline
+                for ev in &batch {
+                    let completed = assembler.process_event(ev);
+                    for span in &completed {
+                        spans_total += 1;
+                        alert_engine.ingest(span);
+                        let d = to_detail(span);
+                        state.trace_store.write().await.insert_span(d);
+                    }
+                }
+
+                if !batch.is_empty() {
+                    info!(events=n, batch=batch.len(), spans=spans_total, conns=assembler.active_connections(), "processed");
+                }
+
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
             } => {}
         }
     }
-
     Ok(())
 }
 
-/// Attach a kprobe (or kretprobe) by program name and kernel function.
-fn attach_kprobe(ebpf: &mut Ebpf, prog_name: &str, fn_name: &str) -> Result<()> {
-    let program: &mut KProbe = ebpf.program_mut(prog_name)
-        .with_context(|| format!("program '{}' not found in BPF binary", prog_name))?
-        .try_into()
-        .with_context(|| format!("'{}' is not a KProbe", prog_name))?;
-    program.load()
-        .with_context(|| format!("failed to load '{}'", prog_name))?;
-    program.attach(fn_name, 0)
-        .with_context(|| format!("failed to attach '{}' to kernel function '{}'", prog_name, fn_name))?;
-    info!(program = prog_name, function = fn_name, "probe attached");
-    Ok(())
+fn to_detail(s: &rail_obs_common::span::SpanEvent) -> SpanDetail {
+    SpanDetail {
+        trace_id: trace_id_to_hex(&s.trace_id), span_id: s.span_id,
+        parent_span_id: s.parent_span_id, service_id: s.service_id.clone(),
+        http_method: s.http_method.clone(), http_path: s.http_path.clone(),
+        http_route: if s.http_route.is_empty() { normalize_route(&s.http_path) } else { s.http_route.clone() },
+        http_status: s.http_status,
+        start_time: s.start_time().to_rfc3339(), duration_us: s.duration_us, is_error: s.is_error,
+    }
 }
 
-/// Log a single event with the decoded 4-tuple.
-fn log_event(header: &TcpEventHeader, count: u64) {
-    let kind_str = match header.kind {
-        0 => "CONNECT",
-        1 => "ACCEPT",
-        2 => "SEND",
-        3 => "RECV",
-        4 => "CLOSE",
-        _ => "???",
-    };
-
-    // Convert network-byte-order IPv4 to human readable
-    let src_ip = Ipv4Addr::from(u32::from_be(header.src_addr));
-    let dst_ip = Ipv4Addr::from(u32::from_be(header.dst_addr));
-
-    info!(
-        "#{} {} pid={} {}:{} -> {}:{} len={}",
-        count,
-        kind_str,
-        header.pid,
-        src_ip,
-        header.src_port,
-        dst_ip,
-        header.dst_port,
-        header.payload_len,
-    );
+fn demo_mapping() -> ServiceMapping {
+    let mut m = ServiceMapping::new();
+    m.register(0, ServiceMeta {
+        project_id: "proj_demo".into(), service_id: "svc_wsl2".into(),
+        service_name: "wsl2".into(), environment_id: "dev".into(), container_id: "wsl2".into(),
+    });
+    m
 }
