@@ -109,6 +109,14 @@ async fn main() -> Result<()> {
     let mut n: u64 = 0;
     let mut spans_total: u64 = 0;
 
+    // PID → last known 4-tuple mapping.
+    // kprobes (tcp_sendmsg/recvmsg) provide the 4-tuple.
+    // Tracepoints (sys_enter_write) provide the payload but no 4-tuple.
+    // We match them by PID: when a tracepoint event has 0.0.0.0 addresses,
+    // we look up the PID's last known 4-tuple from a recent kprobe.
+    use std::collections::HashMap;
+    let mut pid_to_addr: HashMap<u32, (Ipv4Addr, u16, Ipv4Addr, u16)> = HashMap::new();
+
     loop {
         tokio::select! {
             _ = signal::ctrl_c() => {
@@ -126,8 +134,16 @@ async fn main() -> Result<()> {
 
                     let h: &TcpEventHeader = unsafe { &*(b.as_ptr() as *const TcpEventHeader) };
                     n += 1;
-                    let src = Ipv4Addr::from(u32::from_be(h.src_addr));
-                    let dst = Ipv4Addr::from(u32::from_be(h.dst_addr));
+                    let mut src = Ipv4Addr::from(u32::from_be(h.src_addr));
+                    let mut dst = Ipv4Addr::from(u32::from_be(h.dst_addr));
+                    let mut sport = h.src_port;
+                    let mut dport = h.dst_port;
+
+                    // If kprobe event has a real 4-tuple, store it by PID
+                    let has_real_addr = h.src_addr != 0 || h.dst_addr != 0;
+                    if has_real_addr {
+                        pid_to_addr.insert(h.pid, (src, sport, dst, dport));
+                    }
 
                     // Extract payload if present (TcpDataEvent)
                     let payload = if h.payload_len > 0 && b.len() >= core::mem::size_of::<TcpDataEvent>() {
@@ -139,11 +155,21 @@ async fn main() -> Result<()> {
                     };
 
                     if !payload.is_empty() {
-                        let preview = std::str::from_utf8(&payload[..payload.len().min(60)])
+                        // Tracepoint events have 0.0.0.0 addresses — resolve from PID map
+                        if !has_real_addr {
+                            if let Some(&(s, sp, d, dp)) = pid_to_addr.get(&h.pid) {
+                                src = s;
+                                sport = sp;
+                                dst = d;
+                                dport = dp;
+                            }
+                        }
+
+                        let preview = std::str::from_utf8(&payload[..payload.len().min(80)])
                             .unwrap_or("<binary>");
                         info!(
-                            "HTTP captured: pid={} {}:{} -> {}:{} len={} preview='{}'",
-                            h.pid, src, h.src_port, dst, h.dst_port, payload.len(), preview
+                            "HTTP: pid={} {}:{} -> {}:{} len={} '{}'",
+                            h.pid, src, sport, dst, dport, payload.len(), preview
                         );
                     }
 
@@ -155,8 +181,8 @@ async fn main() -> Result<()> {
                                 3 => TcpEventKind::Data(Direction::Recv),
                                 _ => TcpEventKind::Close,
                             },
-                            src_ip: src.into(), src_port: h.src_port,
-                            dst_ip: dst.into(), dst_port: h.dst_port,
+                            src_ip: src.into(), src_port: sport,
+                            dst_ip: dst.into(), dst_port: dport,
                             payload,
                         });
                 }
