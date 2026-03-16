@@ -368,7 +368,11 @@ impl SpanAssembler {
             http_route: String::new(),
             http_status: 0,
             http_host: format!("{}:{}", key.dst_ip, key.dst_port),
-            start_time_ns: conn.connect_time_ns,
+            // Use end_time_ns as the start (monotonic clock from eBPF).
+            // The duration is computed from connect_time to close_time.
+            // In production, we'd convert monotonic → wall clock using
+            // clock_gettime(CLOCK_MONOTONIC) offset at startup.
+            start_time_ns: end_time_ns.saturating_sub(duration_us * 1000),
             duration_us,
             src_ip: key.src_ip,
             src_port: key.src_port,

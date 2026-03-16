@@ -129,6 +129,14 @@ async fn main() -> Result<()> {
                 // Process batch through real pipeline
                 for ev in &batch {
                     let completed = assembler.process_event(ev);
+                    if !completed.is_empty() {
+                        info!(
+                            "span: {} {} duration={}µs",
+                            completed[0].http_method,
+                            completed[0].http_path,
+                            completed[0].duration_us,
+                        );
+                    }
                     for span in &completed {
                         spans_total += 1;
                         alert_engine.ingest(span);
