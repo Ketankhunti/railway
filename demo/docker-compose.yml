@@ -1,0 +1,57 @@
+# Railway Observability Engine — Demo Stack
+#
+# Runs 4 demo services that call each other over plain HTTP.
+# The eBPF collector (running on the host) captures all traffic
+# automatically — zero instrumentation in these services.
+#
+# Usage:
+#   docker compose up --build
+#   curl http://localhost:8001/api/checkout -X POST -H "Content-Type: application/json" -d '{"user_id": 42}'
+#   curl http://localhost:3000/api/v1/traces?project_id=proj_demo&start_time=1970-01-01&end_time=2030-12-31
+
+services:
+  api-gateway:
+    build: ./api-gateway
+    ports:
+      - "8001:8001"
+    environment:
+      - USER_SERVICE_URL=http://user-service:8002
+      - PAYMENT_SERVICE_URL=http://payment-service:8004
+    labels:
+      rail.project: "proj_demo"
+      rail.service: "api-gateway"
+      rail.env: "production"
+    depends_on:
+      - user-service
+      - payment-service
+
+  user-service:
+    build: ./user-service
+    ports:
+      - "8002:8002"
+    environment:
+      - DB_SERVICE_URL=http://db-service:8003
+    labels:
+      rail.project: "proj_demo"
+      rail.service: "user-service"
+      rail.env: "production"
+    depends_on:
+      - db-service
+
+  db-service:
+    build: ./db-service
+    ports:
+      - "8003:8003"
+    labels:
+      rail.project: "proj_demo"
+      rail.service: "db-service"
+      rail.env: "production"
+
+  payment-service:
+    build: ./payment-service
+    ports:
+      - "8004:8004"
+    labels:
+      rail.project: "proj_demo"
+      rail.service: "payment-service"
+      rail.env: "production"
