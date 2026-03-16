@@ -66,6 +66,21 @@ pub struct TcpEventHeader {
     pub payload_len: u16,
 }
 
+/// Maximum payload capture per chunk (BPF verifier limit per bpf_probe_read_user call).
+pub const CHUNK_SIZE: usize = 512;
+
+/// Number of chunks (4 × 512 = 2048 bytes max).
+pub const NUM_CHUNKS: usize = 4;
+
+/// A full event with payload. Used for data events (sys_enter_write, sys_exit_read).
+/// Ring buffer reserves this entire struct; only `header.payload_len` bytes are valid.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TcpDataEvent {
+    pub header: TcpEventHeader,
+    pub payload: [u8; MAX_PAYLOAD_LEN],
+}
+
 // Safety: TcpEventHeader is #[repr(C)] with only fixed-size primitive fields.
 // This is required for reading from the BPF ring buffer.
 #[cfg(not(feature = "no-std-check"))]

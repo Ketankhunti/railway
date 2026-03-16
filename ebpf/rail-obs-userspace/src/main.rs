@@ -15,7 +15,7 @@ use tokio::signal;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-use rail_obs_ebpf_common::TcpEventHeader;
+use rail_obs_ebpf_common::{TcpEventHeader, TcpDataEvent, MAX_PAYLOAD_LEN};
 use rail_obs_common::service::{ServiceMapping, ServiceMeta};
 use rail_obs_common::span::trace_id_to_hex;
 use rail_obs_span_assembler::{SpanAssembler, AssemblerConfig, TcpEvent, TcpEventKind, Direction};
@@ -51,7 +51,22 @@ async fn main() -> Result<()> {
         let prog: &mut KProbe = ebpf.program_mut(name).context(name)?.try_into()?;
         prog.load()?;
         prog.attach(name, 0)?;
-        info!("attached: {}", name);
+        info!("attached kprobe: {}", name);
+    }
+
+    // Attach tracepoint probes for payload capture
+    use aya::programs::TracePoint;
+    for (prog_name, category, tp_name) in [
+        ("sys_enter_write", "syscalls", "sys_enter_write"),
+        ("sys_enter_read", "syscalls", "sys_enter_read"),
+        ("sys_exit_read", "syscalls", "sys_exit_read"),
+    ] {
+        let prog: &mut TracePoint = ebpf.program_mut(prog_name)
+            .with_context(|| format!("tracepoint '{}' not found", prog_name))?
+            .try_into()?;
+        prog.load()?;
+        prog.attach(category, tp_name)?;
+        info!("attached tracepoint: {}/{}", category, tp_name);
     }
 
     // ─── Pipeline ────────────────────────────────────────────────
@@ -105,13 +120,35 @@ async fn main() -> Result<()> {
                 let mut batch = Vec::new();
                 while let Some(ev) = ring_buf.next() {
                     let b: &[u8] = ev.as_ref();
-                    if b.len() >= core::mem::size_of::<TcpEventHeader>() {
-                        let h: &TcpEventHeader = unsafe { &*(b.as_ptr() as *const TcpEventHeader) };
-                        n += 1;
-                        let src = Ipv4Addr::from(u32::from_be(h.src_addr));
-                        let dst = Ipv4Addr::from(u32::from_be(h.dst_addr));
-                        batch.push(TcpEvent {
-                            timestamp_ns: h.timestamp_ns, pid: h.pid, netns: h.netns, fd: 0,
+                    if b.len() < core::mem::size_of::<TcpEventHeader>() {
+                        continue;
+                    }
+
+                    let h: &TcpEventHeader = unsafe { &*(b.as_ptr() as *const TcpEventHeader) };
+                    n += 1;
+                    let src = Ipv4Addr::from(u32::from_be(h.src_addr));
+                    let dst = Ipv4Addr::from(u32::from_be(h.dst_addr));
+
+                    // Extract payload if present (TcpDataEvent)
+                    let payload = if h.payload_len > 0 && b.len() >= core::mem::size_of::<TcpDataEvent>() {
+                        let data_event: &TcpDataEvent = unsafe { &*(b.as_ptr() as *const TcpDataEvent) };
+                        let len = (h.payload_len as usize).min(MAX_PAYLOAD_LEN);
+                        data_event.payload[..len].to_vec()
+                    } else {
+                        vec![]
+                    };
+
+                    if !payload.is_empty() {
+                        let preview = std::str::from_utf8(&payload[..payload.len().min(60)])
+                            .unwrap_or("<binary>");
+                        info!(
+                            "HTTP captured: pid={} {}:{} -> {}:{} len={} preview='{}'",
+                            h.pid, src, h.src_port, dst, h.dst_port, payload.len(), preview
+                        );
+                    }
+
+                    batch.push(TcpEvent {
+                        timestamp_ns: h.timestamp_ns, pid: h.pid, netns: h.netns, fd: h.fd,
                             kind: match h.kind {
                                 0 => TcpEventKind::Connect, 1 => TcpEventKind::Accept,
                                 2 => TcpEventKind::Data(Direction::Send),
@@ -120,9 +157,8 @@ async fn main() -> Result<()> {
                             },
                             src_ip: src.into(), src_port: h.src_port,
                             dst_ip: dst.into(), dst_port: h.dst_port,
-                            payload: vec![],
+                            payload,
                         });
-                    }
                 }
                 // ring_buf borrow is released here — safe to .await below
 
