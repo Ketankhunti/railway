@@ -20,7 +20,13 @@ const users = {
 
 function callDbService(path, callback) {
   const url = new URL(path, DB_SERVICE);
-  http.get(url.toString(), (res) => {
+  const options = {
+    hostname: url.hostname,
+    port: url.port,
+    path: url.pathname + url.search,
+    headers: { 'Connection': 'close' }, // Disable keep-alive for eBPF CLOSE events
+  };
+  http.get(options, (res) => {
     let data = '';
     res.on('data', chunk => data += chunk);
     res.on('end', () => {
