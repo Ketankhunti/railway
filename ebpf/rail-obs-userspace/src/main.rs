@@ -220,14 +220,48 @@ async fn main() -> Result<()> {
 
                 // Process batch through real pipeline
                 for ev in &batch {
-                    let completed = assembler.process_event(ev);
-                    if !completed.is_empty() {
+                    let kind_str = match ev.kind {
+                        TcpEventKind::Connect => "CON",
+                        TcpEventKind::Accept => "ACC",
+                        TcpEventKind::Data(Direction::Send) => "SND",
+                        TcpEventKind::Data(Direction::Recv) => "RCV",
+                        TcpEventKind::Close => "CLS",
+                    };
+
+                    // Log data events with payload (potential HTTP)
+                    let has_payload = !ev.payload.is_empty();
+                    let is_demo = ev.dst_port >= 8001 && ev.dst_port <= 8004
+                        || ev.src_port >= 8001 && ev.src_port <= 8004;
+
+                    if has_payload || is_demo {
+                        let payload_preview = if has_payload {
+                            let end = ev.payload.len().min(50);
+                            std::str::from_utf8(&ev.payload[..end]).unwrap_or("<bin>").to_string()
+                        } else {
+                            format!("(no payload, len hint={})", ev.payload.len())
+                        };
                         info!(
-                            "span: {} {} duration={}µs",
-                            completed[0].http_method,
-                            completed[0].http_path,
-                            completed[0].duration_us,
+                            "[DIAG] {} pid={} netns={} {}:{}-{}:{} payload={} '{}'",
+                            kind_str, ev.pid, ev.netns,
+                            ev.src_ip, ev.src_port, ev.dst_ip, ev.dst_port,
+                            ev.payload.len(), payload_preview
                         );
+                    }
+
+                    let conns_before = assembler.active_connections();
+                    let completed = assembler.process_event(ev);
+                    let conns_after = assembler.active_connections();
+
+                    if !completed.is_empty() {
+                        for s in &completed {
+                            info!(
+                                "[SPAN] {} {} -> {} status={} dur={}µs trace={} parent={} svc={}",
+                                s.http_method, s.http_path, s.dst_ip,
+                                s.http_status, s.duration_us,
+                                &s.trace_id_hex()[..8], s.parent_span_id,
+                                s.service_id,
+                            );
+                        }
                     }
                     for span in &completed {
                         spans_total += 1;
