@@ -33,7 +33,7 @@
 #![allow(unused_mut)]
 
 use aya_ebpf::{
-    helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_probe_read_kernel, bpf_probe_read_user},
+    helpers::{bpf_get_current_pid_tgid, bpf_get_current_task, bpf_ktime_get_ns, bpf_probe_read_kernel, bpf_probe_read_user},
     macros::{kprobe, kretprobe, tracepoint, map},
     maps::{HashMap as BpfHashMap, RingBuf},
     programs::{ProbeContext, RetProbeContext, TracePointContext},
@@ -76,6 +76,14 @@ const SK_SADDR: usize = 4;
 const SK_DPORT: usize = 12;
 const SK_SPORT: usize = 14;
 
+// Offsets for reading network namespace inode (kernel 6.6, from pahole):
+// task_struct.nsproxy = offset 3008 (pointer)
+// nsproxy.net_ns     = offset 40   (pointer to struct net)
+// net.ns.inum        = offset 144  (u32, the inode number)
+const TASK_NSPROXY: usize = 3008;
+const NSPROXY_NET_NS: usize = 40;
+const NET_NS_INUM: usize = 144;  // net.ns (offset 128) + ns_common.inum (offset 16)
+
 // ─── Helpers ──────────────────────────────────────────────────────
 
 #[inline(always)]
@@ -87,6 +95,34 @@ unsafe fn read_sock_tuple(sk: *const u8) -> Result<(u32, u16, u32, u16), i64> {
     Ok((sa, sp, da, u16::from_be(dp)))
 }
 
+/// Read the network namespace inode of the current task.
+/// Follows: current_task → nsproxy → net_ns → ns.inum
+#[inline(always)]
+unsafe fn read_current_netns() -> u32 {
+    let task = bpf_get_current_task() as *const u8;
+    if task.is_null() { return 0; }
+
+    // task->nsproxy (pointer)
+    let nsproxy: u64 = match bpf_probe_read_kernel(task.add(TASK_NSPROXY) as *const u64) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+    if nsproxy == 0 { return 0; }
+
+    // nsproxy->net_ns (pointer to struct net)
+    let net_ns: u64 = match bpf_probe_read_kernel((nsproxy as *const u8).add(NSPROXY_NET_NS) as *const u64) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+    if net_ns == 0 { return 0; }
+
+    // net->ns.inum (u32)
+    match bpf_probe_read_kernel((net_ns as *const u8).add(NET_NS_INUM) as *const u32) {
+        Ok(inum) => inum,
+        Err(_) => 0,
+    }
+}
+
 #[inline(always)]
 fn make_header(kind: EventKind) -> TcpEventHeader {
     let pid_tgid = bpf_get_current_pid_tgid();
@@ -94,7 +130,8 @@ fn make_header(kind: EventKind) -> TcpEventHeader {
         kind: kind as u8,
         pid: (pid_tgid >> 32) as u32,
         tgid: pid_tgid as u32,
-        netns: 0, fd: 0,
+        netns: unsafe { read_current_netns() },
+        fd: 0,
         timestamp_ns: unsafe { bpf_ktime_get_ns() },
         src_addr: 0, src_port: 0, dst_addr: 0, dst_port: 0,
         payload_len: 0,
@@ -155,7 +192,7 @@ unsafe fn capture_and_emit(kind: EventKind, fd: u32, buf_ptr: u64, data_len: usi
         header.kind = kind as u8;
         header.pid = (pid_tgid >> 32) as u32;
         header.tgid = pid_tgid as u32;
-        header.netns = 0;
+        header.netns = read_current_netns();
         header.fd = fd;
         header.timestamp_ns = bpf_ktime_get_ns();
         header.src_addr = 0;

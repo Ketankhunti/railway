@@ -198,10 +198,15 @@ async fn main() -> Result<()> {
                         );
                     }
 
-                    // Resolve netns from /proc/{pid}/ns/net (cached per PID)
-                    let netns = *pid_to_netns.entry(h.pid).or_insert_with(|| {
-                        resolve_netns(h.pid).unwrap_or(0)
-                    });
+                    // Use eBPF-reported netns (from kernel) if available,
+                    // otherwise fall back to /proc/{pid}/ns/net resolution.
+                    let netns = if h.netns != 0 {
+                        h.netns
+                    } else {
+                        *pid_to_netns.entry(h.pid).or_insert_with(|| {
+                            resolve_netns(h.pid).unwrap_or(0)
+                        })
+                    };
 
                     batch.push(TcpEvent {
                         timestamp_ns: h.timestamp_ns, pid: h.pid, netns, fd: h.fd,

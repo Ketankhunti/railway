@@ -14,6 +14,7 @@ services:
     build: ./api-gateway
     ports:
       - "8001:8001"
+    restart: always
     environment:
       - USER_SERVICE_URL=http://user-service:8002
       - PAYMENT_SERVICE_URL=http://payment-service:8004
@@ -29,6 +30,7 @@ services:
     build: ./user-service
     ports:
       - "8002:8002"
+    restart: always
     environment:
       - DB_SERVICE_URL=http://db-service:8003
     labels:
@@ -42,6 +44,7 @@ services:
     build: ./db-service
     ports:
       - "8003:8003"
+    restart: always
     labels:
       rail.project: "proj_demo"
       rail.service: "db-service"
@@ -51,6 +54,7 @@ services:
     build: ./payment-service
     ports:
       - "8004:8004"
+    restart: always
     labels:
       rail.project: "proj_demo"
       rail.service: "payment-service"
