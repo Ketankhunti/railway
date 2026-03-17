@@ -77,9 +77,24 @@ async fn main() -> Result<()> {
     info!("all 12 probes attached");
 
     // ─── Pipeline ────────────────────────────────────────────────
+    // Try to load service mapping from services.json (written by discovery shim).
+    // If not found, start with empty mapping — spans will show as "unknown" service
+    // until the shim registers containers.
+    let service_mapping = match rail_obs_discovery::MappingFile::read_from_path(
+        std::path::Path::new(rail_obs_discovery::SERVICES_FILE_PATH)
+    ) {
+        Ok(m) => {
+            info!(services = m.namespaces.len(), "loaded services.json");
+            m
+        }
+        Err(_) => {
+            info!("no services.json found, starting with empty mapping");
+            ServiceMapping::new()
+        }
+    };
     let mut assembler = SpanAssembler::new(
         AssemblerConfig { max_connections: 100_000, max_pending_per_conn: 64, host_id: "wsl2".into() },
-        demo_mapping(),
+        service_mapping,
     );
     let mut alert_engine = AlertEngine::new(AlertEngineConfig { max_window_secs: 3600, eval_interval_spans: 50 });
     alert_engine.add_rule(AlertRule {
@@ -119,10 +134,13 @@ async fn main() -> Result<()> {
     // PID → last known 4-tuple mapping.
     // kprobes (tcp_sendmsg/recvmsg) provide the 4-tuple.
     // Tracepoints (sys_enter_write) provide the payload but no 4-tuple.
-    // We match them by PID: when a tracepoint event has 0.0.0.0 addresses,
-    // we look up the PID's last known 4-tuple from a recent kprobe.
+    // We match them by PID.
     use std::collections::HashMap;
     let mut pid_to_addr: HashMap<u32, (Ipv4Addr, u16, Ipv4Addr, u16)> = HashMap::new();
+
+    // PID → network namespace inode cache.
+    // Read from /proc/{pid}/ns/net on first event per PID.
+    let mut pid_to_netns: HashMap<u32, u32> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -180,8 +198,13 @@ async fn main() -> Result<()> {
                         );
                     }
 
+                    // Resolve netns from /proc/{pid}/ns/net (cached per PID)
+                    let netns = *pid_to_netns.entry(h.pid).or_insert_with(|| {
+                        resolve_netns(h.pid).unwrap_or(0)
+                    });
+
                     batch.push(TcpEvent {
-                        timestamp_ns: h.timestamp_ns, pid: h.pid, netns: h.netns, fd: h.fd,
+                        timestamp_ns: h.timestamp_ns, pid: h.pid, netns, fd: h.fd,
                             kind: match h.kind {
                                 0 => TcpEventKind::Connect, 1 => TcpEventKind::Accept,
                                 2 => TcpEventKind::Data(Direction::Send),
@@ -237,10 +260,15 @@ fn to_detail(s: &rail_obs_common::span::SpanEvent) -> SpanDetail {
 }
 
 fn demo_mapping() -> ServiceMapping {
-    let mut m = ServiceMapping::new();
-    m.register(0, ServiceMeta {
-        project_id: "proj_demo".into(), service_id: "svc_wsl2".into(),
-        service_name: "wsl2".into(), environment_id: "dev".into(), container_id: "wsl2".into(),
-    });
-    m
+    // Services will be discovered dynamically via netns resolution.
+    // No hardcoded mapping needed — the PID→netns cache + services.json
+    // integration will handle it in production. For demo, services that
+    // can't be resolved show as "unknown" which is still traceable.
+    ServiceMapping::new()
+}
+
+/// Resolve a PID's network namespace inode from /proc/{pid}/ns/net.
+/// Returns the inode number, or an error if the process doesn't exist.
+fn resolve_netns(pid: u32) -> anyhow::Result<u32> {
+    rail_obs_discovery::read_netns_inode(pid)
 }
