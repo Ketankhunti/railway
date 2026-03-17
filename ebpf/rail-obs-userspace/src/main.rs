@@ -51,23 +51,30 @@ async fn main() -> Result<()> {
         let prog: &mut KProbe = ebpf.program_mut(name).context(name)?.try_into()?;
         prog.load()?;
         prog.attach(name, 0)?;
-        info!("attached kprobe: {}", name);
+        info!("kprobe: {}", name);
     }
 
-    // Attach tracepoint probes for payload capture
+    // Attach ALL tracepoints for comprehensive payload capture
     use aya::programs::TracePoint;
     for (prog_name, category, tp_name) in [
+        // Outbound payload (covers write, sendto, writev)
         ("sys_enter_write", "syscalls", "sys_enter_write"),
+        ("sys_enter_sendto", "syscalls", "sys_enter_sendto"),
+        ("sys_enter_writev", "syscalls", "sys_enter_writev"),
+        // Inbound payload (covers read, recvfrom)
         ("sys_enter_read", "syscalls", "sys_enter_read"),
         ("sys_exit_read", "syscalls", "sys_exit_read"),
+        ("sys_enter_recvfrom", "syscalls", "sys_enter_recvfrom"),
+        ("sys_exit_recvfrom", "syscalls", "sys_exit_recvfrom"),
     ] {
         let prog: &mut TracePoint = ebpf.program_mut(prog_name)
             .with_context(|| format!("tracepoint '{}' not found", prog_name))?
             .try_into()?;
         prog.load()?;
         prog.attach(category, tp_name)?;
-        info!("attached tracepoint: {}/{}", category, tp_name);
+        info!("tracepoint: {}/{}", category, tp_name);
     }
+    info!("all 12 probes attached");
 
     // ─── Pipeline ────────────────────────────────────────────────
     let mut assembler = SpanAssembler::new(
